@@ -2,6 +2,8 @@
 
 This project is mostly feature complete, however, things should be considered Beta quality at this point.  Contributors and questions are welcome.
 
+![alt text](SD-Perimter%20Diagram.png "SD-Perimeter Diagram")
+
 This project is focused on providing a set of scripts that can be used to create a Software Defined Perimeter using open source tools readily available in common Linux distributions. The techniques implemented here are heavily influenced by Google's <a href="https://www.beyondcorp.com/">BeyondCorp</a> and the Cloud Security Alliance model of <a href="https://cloudsecurityalliance.org/group/software-defined-perimeter/#_overview">Software Defined Perimeter</a>.
 
 Tools:
