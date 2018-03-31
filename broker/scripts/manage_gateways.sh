@@ -14,33 +14,43 @@ OPENVPN_GATEWAY_BASE=$OPENVPN_CLIENT_FOLDER/sdp-gateway-base
 
 . $DB_CONFIG
 
-# Either read the CN from $1 or prompt for it
-if [ -z "$1" ]
-	then echo -n "Enter new gateway common name (CN): "
-	read -e CN
-else
-	CN=$1
-fi
-
-# Ensure CN isn't blank
-if [ -z "$CN" ]
-	then echo "You must provide a CN."
-	exit
-fi
-
 SDP_MANAGE_HOME=/home/sdpmanagement
 FWKNOP_DIR=/etc/fwknop
 FWKNOP_KEYS=$FWKNOP_DIR/fwknop_keys.conf
 #FWKNOP_KEYS=$SDP_MANAGE_HOME/${CN}_fwknop_keys.conf
 
+function showGateways {
+  title="List Gateways"
+  whiptail --textbox --title "$title" --scrolltext /dev/stdin 25 78 <<<"$(
+        echo 'Configured Gateways:\n\n'
+        mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -e '
+            SELECT CONCAT(
+                  gateway_name,";",
+                  gateway_ip,";",
+                  gateway_online,";",
+                  gateway_enable
+            ) "<GW NAME>;<IP>;<ONLINE>;<ENABLED>"
+            FROM gateway
+            ORDER BY gateway_name
+        ' | column -t -s ';')"
+  optionsMenu
+
+}
+
 function selectGwIP {
-read -p "Choose an IP address for your gateway from the $GATEWAY_NET network: " GATEWAY_IP
-if [ `mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -sNe "select count(*) from gateway where gateway_ip = '$GATEWAY_IP'"` -gt 0 ]; then
-    echo "IP Already in use. You must select a different IP"
-    echo ""
-    selectGwIP
-fi
-echo "ifconfig-push $GATEWAY_IP $GATEWAY_GATEWAY" > $OPENVPN_CLIENT_FOLDER/$CN 
+  GATEWAY_IP=$(whiptail --inputbox "\nChoose an IP address for your gateway from the $GATEWAY_NET network." \
+    8 78 --title "$title" 3>&1 1>&2 2>&3
+  )
+  exitstatus=$?
+
+  if [ $exitstatus = 0 ]; then
+    if [ `mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -sNe "select count(*) from gateway where gateway_ip = '$GATEWAY_IP'"` -gt 0 ]; then
+      whiptail --textbox --title "$title" --scrolltext /dev/stdin \
+          8 78 <<<$(echo "IP Already in use. You must select a different IP")
+      selectGwIP
+    fi
+    echo "ifconfig-push $GATEWAY_IP $GATEWAY_GATEWAY" > $OPENVPN_CLIENT_FOLDER/$CN
+  fi 
 }
 
 function createSshKey {
@@ -50,8 +60,11 @@ function createSshKey {
 }
 
 function deleteSshKey {
-    sed -i '/`cat $SDP_MANAGE_HOME/${CN}_rsa.pub`/d' $SDP_MANAGE_HOME/.ssh/authorized_keys
+    RSA_PUB=`cat $SDP_MANAGE_HOME/${CN}_rsa.pub | awk '{print $2}'`
+    sed -i "\@$RSA_PUB@d" $SDP_MANAGE_HOME/.ssh/authorized_keys
     rm -f $SDP_MANAGE_HOME/${CN}_rsa.pub
+    rm -f $SDP_MANAGE_HOME/${CN}_rsa
+    rm -f $SDP_MANAGE_HOME/${CN}_gw_config.sh
 }
 
 function createFwknopKeys {
@@ -139,18 +152,18 @@ function writeGatewayConfig {
 }
 
 function revokeCert {
-    echo "Revoking previous Cert"
-    rm $GATEWAY_OUTPUT_DIR/$USERNAME.ovpn
+    if [ -e ${OPENVPN_KEYS}/$CN.crt ]; then
+      echo "Revoking previous Cert"
+      
+      # Enter the easy-rsa directory and establish the default variables
+      cd $OPENVPN_RSA_DIR
+      source ./vars > /dev/null
+      
+      # Copied from revoke-full script (to ensure it works!)
+      CRL="crl.pem"
+      RT="revoke-test.pem"
 
-    # Enter the easy-rsa directory and establish the default variables
-    cd $OPENVPN_RSA_DIR
-    source ./vars > /dev/null
-
-    # Copied from revoke-full script (to ensure it works!)
-    CRL="crl.pem"
-    RT="revoke-test.pem"
-
-    if [ "$KEY_DIR" ]; then
+      if [ "$KEY_DIR" ]; then
         cd "$KEY_DIR"
         rm -f "$RT"
     
@@ -176,17 +189,18 @@ function revokeCert {
     
         # verify the revocation
         $OPENSSL verify -CAfile "$RT" -crl_check "$CN.crt"
-    else
+      else
         echo 'Please source the vars script first (i.e. "source ./vars")'
         echo 'Make sure you have edited it to reflect your configuration.'
+      fi
+      rm ${OPENVPN_KEYS}/$CN.crt
+      rm ${OPENVPN_KEYS}/$CN.key
+      rm ${OPENVPN_KEYS}/$CN.csr
+      sudo rm $OPENVPN_CLIENT_FOLDER/$CN
+      sudo rm $GATEWAY_OUTPUT_DIR/$CN.ovpn
+      echo "Previous Certificate has been revoked"
+      echo ""
     fi
-    rm ${OPENVPN_KEYS}/$CN.crt
-    rm ${OPENVPN_KEYS}/$CN.key
-    rm ${OPENVPN_KEYS}/$CN.csr
-    sudo rm $OPENVPN_CLIENT_FOLDER/$CN
-    sudo rm $GATEWAY_OUTPUT_DIR/$CN.ovpn
-    echo "Previous Certificate has been revoked"
-    echo ""
 }
 
 function showSetupInfo {
@@ -224,16 +238,24 @@ function showSetupInfo {
   echo 
   echo
   echo
-  read -p "Press 'Enter' when gateway setup is completed..."
-  echo "SSH port is now being closed."
+  echo "Press 'Enter' when gateway setup is completed..."
+  read -p "SSH port will be closed."
+  clear
   #ufw delete allow 22/tcp
 }
 
 
 function disableDbEntries {
-    mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -e "update gateway set gateway_enable='no',gateway_ip=null where gateway_name='$CN'"
+    mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -e "
+        UPDATE gateway
+        SET gateway_enable='no'
+        WHERE gateway_name='$CN'
+    "
 }
 
+function deleteDbEntries {
+    mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -e "delete from gateway where gateway_name='$CN'"
+}
 function enableDbEntries {
     mysql -h$HOST -P$PORT -u$USER -p$PASS $DB -e "update gateway set gateway_enable='yes' where gateway_name='$CN'"
 }
@@ -259,62 +281,123 @@ function removeSquidPeer {
    service squid reload
 }
 
-# Check the CN doesn't already exist
-if [ -f $OPENVPN_KEYS/$CN.crt ]; then
-  echo "Certificate with the CN $CN alread exists!"
-  PS3='Choose an Option to Continue: '
-  options=("Rebuild Configuration" "Revoke cert and rebuild Configuration"
-        "Disable Gateway" "Delete Gateway" "Exit")
-    select opt in "${options[@]}"
-      do
-        case $opt in
-          "Rebuild Configuration")
-            echo "Rebuilding Configuration now"
-            createOvpn
-            writeGatewayConfig
-            enableDbEntries
-            createSquidPeer
-            break
-            ;;
-          "Revoke cert and rebuild Configuration")
-            echo "Revoking Cert and Rebuilding New Configuration"
-            revokeCert
-            createCert
-            createOvpn
-            writeGatewayConfig
-            enableDbEntries
-            createSquidPeer
-            break
-            ;;
-          "Disable Gateway")
-            echo "Disabling Gateway"
-            revokeCert
-            disableDbEntries
-            removeSquidPeer
-            break
-            ;;
-          "Delete Gateway")
-            echo "Deleting Gateway"
-            revokeCert
-            deleteSshKey
-            disableDbEntries
-            removeSquidPeer
-            break
-            ;;
-          "Exit")
-            exit
-            ;;
-          *) echo invalid option;;
-        esac
-      done
-    exit
+function getCommonName {
+  CN=$(
+    whiptail --inputbox "\nEnter the gateway name:" 8 78 \
+    --title "$title" 3>&1 1>&2 2>&3
+  )
+  exitstatus=$?
+}
+
+function getCurrentGwIP {
+  GATEWAY_IP=`grep GATEWAY_IP $GATEWAY_OUTPUT_DIR/$CN_gw_config.sh | sed 's/GATEWAY_IP=//'`
+}
+
+function createGateway {
+  title="Create a New Gateway"
+  getCommonName
+  if [ $exitstatus = 0 ]; then
+    selectGwIP
+    if [ $exitstatus = 0 ]; then
+      createSshKey
+      createCert
+      createOvpn
+      writeGatewayConfig
+      createDbEntries
+      createSquidPeer
+      showSetupInfo
+    fi
+  fi
+  optionsMenu
+}
+
+function refreshConfig {
+  title="Refresh a Gatway Configuration"
+  getCommonName
+  if [ $exitstatus = 0 ]; then
+    getCurrentGwIP
+    revokeCert
+    createCert
+    createOvpn
+    writeGatewayConfig
+    enableDbEntries
+    createSquidPeer
+  fi
+  optionsMenu
+}
+
+function disableGateway {
+  title="Disable an existing Gateway"
+  getCommonName
+  if [ $exitstatus = 0 ]; then
+    revokeCert
+    disableDbEntries
+    removeSquidPeer
+  fi
+  optionsMenu
+}
+
+function deleteGateway {
+  title="Delete an existing Gateway"
+  getCommonName
+  if [ $exitstatus = 0 ]; then
+    revokeCert
+    deleteSshKey
+    deleteDbEntries
+    removeSquidPeer
+  fi
+  optionsMenu
+}
+
+function optionsMenu {
+  opt=$(
+    whiptail --title "GATEWAY MANAGEMENT OPTIONS" --menu "\nChoose an item to continue:" \
+    25 78 16 \
+    "List Gateways" "Show a list of all current gateways." \
+    "Add Gateway" "Create a new gateway." \
+    "Refresh a Configuration" "Rebuild a gateway's configuration." \
+    "Disable Gateway" "Disable an existing gateway." \
+    "Delete Gateway" "Delete an existing gateway." 3>&2 2>&1 1>&3
+  )
+  exitstatus=$?
+
+  if [ $exitstatus = 0 ]; then
+    case $opt in
+      "List Gateways")
+        showGateways
+        ;;
+      "Add Gateway")
+        createGateway
+        ;;
+      "Refresh a Configuration")
+        refreshConfig
+        ;;
+      "Disable Gateway")
+        disableGateway
+        ;;
+      "Delete Gateway")
+        deleteGateway
+        ;;
+    esac
+  fi
+}
+
+if [ -z "$1" ]; then
+  optionsMenu
 else
-        selectGwIP
-        createSshKey
-        createCert
-        createOvpn
-        writeGatewayConfig
-        createDbEntries
-        createSquidPeer
-        showSetupInfo
+  CN=$1
+  if [ -e $OPENVPN_KEYS/$CN.crt ]; then
+    optionsMenu
+  else
+    selectGwIP
+    if [ $exitstatus = 0 ]; then
+      createSshKey
+      createCert
+      createOvpn
+      writeGatewayConfig
+      createDbEntries
+      createSquidPeer
+      showSetupInfo
+    fi
+  fi
 fi
